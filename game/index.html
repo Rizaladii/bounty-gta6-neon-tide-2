@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NEON TIDE</title>
+<!--
+  NEON TIDE — Port Marigold. Full 3D open-world crime game (Three.js / WebGL2).
+  Everything loads from the game/ directory: no CDN, no web fonts, no images,
+  no network requests at runtime. Runs fully offline from this file.
+
+  DOM CONTRACTS (for main.js — Stage 9 — and dialogue.js — Stage 7):
+  - #game-container : mount point for the WebGL canvas (renderer appends here).
+  - #hud : HUD mount. The static markup inside is a pre-boot placeholder;
+    hud.js (createHUD) removes any existing #hud at boot and rebuilds the
+    live HUD (same layout, same classes) inside a fresh #hud element.
+    Static ids: #hud-district, #hud-stars, #hud-search, #hud-objective-text,
+    #hud-money, #hud-health-bar, #hud-health-num, #hud-units,
+    #hud-minimap (canvas), #hud-weapon-fists / -pistol / -smg / -shotgun,
+    #hud-radio-name, #hud-speed-num, #hud-speed-car.
+  - #start-screen : #game-title, #btn-new-game, #btn-continue, #btn-settings.
+  - #settings-overlay : #settings-volume (0-100), #settings-volume-value,
+    #settings-music, #settings-camera (near/far), #settings-hud,
+    #settings-minimap, #settings-quality (low/medium/high),
+    #settings-autodownscale, #settings-inverty, #settings-close,
+    #settings-reset. Settings shape matches save.js DEFAULT_SETTINGS
+    (volume 0..1, music, cameraMode, showHUD, minimap, quality,
+    autoDownscale, invertY; keys neon-tide-save-v1 / neon-tide-settings-v1).
+  - #dialogue-box : #dialogue-portrait (canvas, character portrait),
+    #dialogue-name, #dialogue-text (English subtitles), #dialogue-hint.
+  - #map-overlay : static pre-boot placeholder (hidden). The LIVE map is
+    built by map.js (setupMap) at boot as #neon-tide-map-overlay with its
+    own menu (New Game / Continue / Settings), map canvas and legend.
+    Static ids: #map-btn-new-game, #map-btn-continue, #map-btn-settings,
+    #map-canvas, #map-legend.
+  - #pause-overlay : #btn-resume, #btn-pause-settings, #btn-pause-quit.
+  - #busted-screen : #busted-reason, #btn-retry, #btn-busted-title.
+-->
+<style>
+  :root {
+    --neon-red: #ff5340;
+    --neon-orange: #ff7a3c;
+    --neon-gold: #ffb36b;
+    --neon-teal: #2fd8c8;
+    --neon-magenta: #ff4fd8;
+    --ink: #f2ede6;
+    --ink-dim: #9a8fa8;
+    --panel: rgba(8, 10, 22, 0.72);
+    --panel-solid: #0b0710;
+    --line: rgba(255, 90, 60, 0.45);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #070512;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink);
+  }
+  #game-container, #game-container canvas {
+    position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+  }
+  #game-container { z-index: 0; }
+  button { font-family: inherit; cursor: pointer; }
+  button:disabled { opacity: 0.35; cursor: default; }
+  .hidden { display: none !important; }
+
+  /* ---------- shared overlay shell ---------- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(120% 100% at 50% 0%, rgba(60, 16, 64, 0.55) 0%, rgba(4, 6, 18, 0.88) 70%);
+  }
+  .menu-btn {
+    display: block; width: 100%; text-align: left;
+    background: transparent; border: 1px solid var(--line); border-radius: 4px;
+    padding: 13px 16px; margin-bottom: 12px;
+    font-size: 19px; font-weight: 800; letter-spacing: 2px;
+    color: var(--neon-orange);
+    text-shadow: 0 0 12px rgba(255, 80, 40, 0.85);
+  }
+  .menu-btn:hover:not(:disabled) { background: rgba(255, 90, 60, 0.16); color: var(--neon-gold); }
+  .menu-btn.primary { border-color: rgba(255, 120, 60, 0.8); color: #ffd9a8; }
+
+  /* ---------- start screen ---------- */
+  #start-screen { z-index: 70; }
+  .start-inner { width: min(560px, 92vw); text-align: left; }
+  #game-title {
+    margin: 0; font-size: 72px; font-weight: 900; letter-spacing: 10px; line-height: 1;
+    color: var(--neon-red);
+    text-shadow: 0 0 18px rgba(255, 70, 40, 0.9), 0 0 60px rgba(255, 90, 40, 0.55);
+  }
+  #game-subtitle {
+    margin: 10px 0 4px; font-size: 15px; font-weight: 700; letter-spacing: 8px;
+    color: var(--neon-gold); text-shadow: 0 0 10px rgba(255, 150, 60, 0.7);
+  }
+  #game-tagline { margin: 0 0 28px; font-size: 14px; color: var(--ink-dim); letter-spacing: 1px; }
+  #start-screen .menu-btn { width: 320px; }
+  #start-hint { margin-top: 18px; font-size: 12px; line-height: 1.8; color: var(--ink-dim); letter-spacing: 1px; }
+  #start-hint b { color: var(--ink); }
+
+  /* ---------- settings overlay ---------- */
+  #settings-overlay { z-index: 80; background: rgba(4, 6, 18, 0.92); }
+  .settings-panel {
+    width: min(480px, 92vw); background: linear-gradient(180deg, #120a18 0%, #0b0710 100%);
+    border: 1px solid var(--line); border-radius: 8px; padding: 26px 28px;
+  }
+  .settings-panel h2 {
+    margin: 0 0 4px; font-size: 26px; font-weight: 900; letter-spacing: 5px; color: var(--neon-red);
+    text-shadow: 0 0 14px rgba(255, 70, 40, 0.9);
+  }
+  .settings-panel .sub { margin: 0 0 20px; font-size: 12px; letter-spacing: 3px; color: var(--ink-dim); }
+  .setting-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    font-size: 15px;
+  }
+  .setting-row label { font-weight: 700; letter-spacing: 1px; }
+  .setting-row .hint { display: block; font-size: 11px; font-weight: 400; color: var(--ink-dim); letter-spacing: 0; margin-top: 2px; }
+  .setting-row select, .setting-row input[type="range"] { accent-color: var(--neon-red); }
+  .setting-row select {
+    background: #160b1e; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 4px; padding: 6px 8px; font-size: 14px;
+  }
+  .setting-row input[type="range"] { width: 160px; }
+  .setting-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--neon-red); }
+  #settings-volume-value { min-width: 40px; text-align: right; color: var(--neon-gold); font-weight: 800; }
+  .settings-actions { display: flex; gap: 12px; margin-top: 22px; }
+  .settings-actions .menu-btn { margin-bottom: 0; text-align: center; font-size: 16px; }
+
+  /* ---------- HUD (static pre-boot placeholder; hud.js rebuilds it live) ---------- */
+  #hud { position: fixed; inset: 0; z-index: 20; pointer-events: none; font-weight: 700; }
+  .hud-top-left { position: absolute; top: 14px; left: 16px; }
+  #hud-district { font-size: 20px; letter-spacing: 2px; color: #ffe9c9; text-shadow: 0 0 10px rgba(255, 170, 80, 0.6), 0 2px 4px rgba(0, 0, 0, 0.8); }
+  #hud-stars { font-size: 22px; letter-spacing: 3px; margin-top: 2px; color: #3a3348; text-shadow: 0 0 6px rgba(0, 0, 0, 0.9); }
+  #hud-stars .lit { color: #ffd23c; text-shadow: 0 0 12px rgba(255, 210, 60, 0.9); }
+  #hud-search {
+    display: none; margin-top: 4px; font-size: 13px; letter-spacing: 4px; color: #7fd8ff;
+    text-shadow: 0 0 10px rgba(80, 180, 255, 0.9);
+  }
+  #hud-objective {
+    position: absolute; top: 96px; left: 16px; max-width: 340px;
+    background: var(--panel); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 4px;
+    padding: 8px 12px; font-size: 13px; line-height: 1.45;
+  }
+  #hud-objective .hud-objective-label { color: var(--neon-gold); letter-spacing: 2px; margin-right: 8px; font-size: 11px; }
+  .hud-top-right { position: absolute; top: 14px; right: 16px; text-align: right; }
+  #hud-money { font-size: 24px; color: #7dff9a; text-shadow: 0 0 10px rgba(80, 255, 140, 0.5), 0 2px 4px rgba(0, 0, 0, 0.8); }
+  #hud-health { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; letter-spacing: 2px; }
+  #hud-health-track { width: 140px; height: 10px; background: rgba(255, 255, 255, 0.15); border-radius: 5px; overflow: hidden; }
+  #hud-health-bar { height: 100%; width: 100%; background: linear-gradient(90deg, #ff5340, #ffb36b); }
+  #hud-units {
+    display: none; margin-top: 8px; background: var(--panel); border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 4px; padding: 8px 10px; font-size: 12px; text-align: left; min-width: 180px;
+  }
+  #hud-units-title { color: #7fd8ff; letter-spacing: 2px; font-size: 11px; margin-bottom: 4px; }
+  .hud-bottom-left { position: absolute; left: 16px; bottom: 16px; display: flex; align-items: flex-end; gap: 12px; }
+  #hud-minimap {
+    width: 150px; height: 150px; border: 1px solid rgba(255, 255, 255, 0.25);
+    border-radius: 4px; background: #0a1a2e; display: block;
+  }
+  #hud-weapons { display: flex; flex-direction: column; gap: 6px; }
+  .hud-weapon {
+    display: flex; gap: 8px; align-items: baseline;
+    background: var(--panel); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 4px;
+    padding: 5px 10px; font-size: 13px; color: var(--ink-dim);
+  }
+  .hud-weapon.active { color: var(--ink); border-color: var(--neon-gold); box-shadow: 0 0 10px rgba(255, 179, 107, 0.35); }
+  .hud-weapon .hud-weapon-key { color: var(--neon-gold); font-size: 11px; }
+  .hud-weapon .hud-weapon-ammo { margin-left: auto; color: #7dff9a; }
+  .hud-bottom-right { position: absolute; right: 16px; bottom: 16px; text-align: right; }
+  #hud-radio {
+    display: inline-block; background: var(--panel); border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 4px; padding: 6px 12px; font-size: 13px; margin-bottom: 8px;
+  }
+  #hud-radio-name { color: var(--neon-teal); }
+  #hud-speed {
+    background: var(--panel); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 4px;
+    padding: 8px 12px; min-width: 190px;
+  }
+  #hud-speed-num { font-size: 30px; color: #fff; }
+  #hud-speed-unit { font-size: 12px; color: var(--ink-dim); margin-left: 4px; }
+  #hud-speed-track { height: 6px; background: rgba(255, 255, 255, 0.15); border-radius: 3px; margin: 6px 0 4px; overflow: hidden; }
+  #hud-speed-bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--neon-teal), var(--neon-magenta)); }
+  #hud-speed-car { font-size: 11px; letter-spacing: 2px; color: var(--neon-gold); }
+
+  /* ---------- dialogue box ---------- */
+  #dialogue-box {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    z-index: 40; width: min(760px, 94vw); display: none;
+    background: rgba(8, 10, 22, 0.88); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; align-items: flex-start; gap: 16px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  }
+  #dialogue-box.open { display: flex; }
+  #dialogue-portrait {
+    width: 96px; height: 96px; flex: 0 0 96px; border-radius: 6px;
+    border: 1px solid rgba(255, 179, 107, 0.5); background: #160b1e; display: block;
+  }
+  #dialogue-body { flex: 1; min-width: 0; }
+  #dialogue-name { font-size: 16px; font-weight: 900; letter-spacing: 2px; color: var(--neon-gold); margin-bottom: 6px; }
+  #dialogue-text { font-size: 16px; line-height: 1.55; color: var(--ink); }
+  #dialogue-hint { margin-top: 8px; font-size: 11px; letter-spacing: 2px; color: var(--ink-dim); }
+
+  /* ---------- map overlay (static pre-boot placeholder; map.js builds the live one) ---------- */
+  #map-overlay {
+    position: fixed; inset: 0; z-index: 60; display: none; flex-direction: row; align-items: stretch;
+    background: rgba(4, 7, 16, 0.94);
+  }
+  #map-overlay.open { display: flex; }
+  #map-menu {
+    width: 264px; flex: 0 0 264px; display: flex; flex-direction: column;
+    background: linear-gradient(180deg, #120a18 0%, #0b0710 100%);
+    border-right: 2px solid var(--line); padding: 28px 22px;
+  }
+  #map-menu h2 { margin: 0; font-size: 32px; font-weight: 900; letter-spacing: 5px; color: var(--neon-red); line-height: 1.1; text-shadow: 0 0 14px rgba(255, 70, 40, 0.9), 0 0 42px rgba(255, 90, 40, 0.55); }
+  #map-menu .map-sub { margin-top: 6px; font-size: 13px; font-weight: 700; letter-spacing: 6px; color: var(--neon-gold); }
+  #map-menu .menu-btn { margin-top: 22px; }
+  #map-menu .menu-btn + .menu-btn { margin-top: 0; }
+  #map-menu .map-hint { margin-top: auto; font-size: 12px; letter-spacing: 1px; color: var(--ink-dim); }
+  #map-panel { flex: 1; display: flex; flex-direction: column; padding: 20px 24px 24px; min-width: 0; }
+  #map-panel header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+  #map-panel header h3 { margin: 0; font-size: 20px; font-weight: 900; letter-spacing: 5px; color: #ffe9c9; }
+  #map-panel header span { font-size: 12px; letter-spacing: 3px; color: #8fa8c0; }
+  #map-canvas { flex: 1; min-height: 0; width: 100%; border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 6px; background: #0a1a2e; }
+  #map-legend {
+    position: absolute; right: 36px; bottom: 36px; background: var(--panel);
+    border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 4px; padding: 10px 14px; font-size: 12px; line-height: 1.9;
+  }
+  #map-legend b { letter-spacing: 2px; color: var(--neon-gold); }
+  #map-legend .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
+
+  /* ---------- pause overlay ---------- */
+  #pause-overlay { z-index: 75; background: rgba(4, 6, 18, 0.82); }
+  .pause-inner { width: min(360px, 92vw); }
+  .pause-inner h2 {
+    margin: 0 0 24px; font-size: 40px; font-weight: 900; letter-spacing: 8px; color: var(--neon-red);
+    text-shadow: 0 0 16px rgba(255, 70, 40, 0.9); text-align: center;
+  }
+
+  /* ---------- BUSTED screen ---------- */
+  #busted-screen { z-index: 90; background: radial-gradient(100% 100% at 50% 40%, rgba(120, 10, 20, 0.75) 0%, rgba(4, 6, 18, 0.94) 75%); }
+  .busted-inner { width: min(480px, 92vw); text-align: center; }
+  .busted-inner h2 {
+    margin: 0; font-size: 64px; font-weight: 900; letter-spacing: 10px; color: #ff2d2d;
+    text-shadow: 0 0 24px rgba(255, 30, 30, 0.95), 0 0 80px rgba(255, 30, 30, 0.5);
+  }
+  #busted-reason { margin: 14px 0 28px; font-size: 16px; line-height: 1.6; color: var(--ink); }
+  .busted-inner .menu-btn { width: 320px; margin-left: auto; margin-right: auto; text-align: center; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="game-container"></div>
+<noscript><p style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#f2ede6;background:#070512;z-index:999;">NEON TIDE needs JavaScript enabled to play.</p></noscript>
+
+<!-- HUD (static pre-boot placeholder; hud.js rebuilds the live HUD at boot) -->
+<div id="hud" data-hud="neon-tide">
+  <div class="hud-top-left">
+    <div id="hud-district">Port Marigold</div>
+    <div id="hud-stars"><span>★</span><span>★</span><span>★</span><span>★</span><span>★</span></div>
+    <div id="hud-search">SEARCH</div>
+  </div>
+  <div id="hud-objective"><span class="hud-objective-label">OBJECTIVE</span><span id="hud-objective-text"></span></div>
+  <div class="hud-top-right">
+    <div id="hud-money">$500</div>
+    <div id="hud-health"><span>HEALTH</span><div id="hud-health-track"><div id="hud-health-bar"></div></div><span id="hud-health-num">100</span></div>
+    <div id="hud-units"><div id="hud-units-title">MHP UNITS</div><div id="hud-units-rows"></div></div>
+  </div>
+  <div class="hud-bottom-left">
+    <canvas id="hud-minimap" width="300" height="300"></canvas>
+    <div id="hud-weapons">
+      <div class="hud-weapon active" id="hud-weapon-fists"><span class="hud-weapon-key">Q</span><span class="hud-weapon-name">Fists</span><span class="hud-weapon-ammo">∞</span></div>
+      <div class="hud-weapon" id="hud-weapon-pistol"><span class="hud-weapon-key">1</span><span class="hud-weapon-name">Pistol</span><span class="hud-weapon-ammo">0</span></div>
+      <div class="hud-weapon" id="hud-weapon-smg"><span class="hud-weapon-key">2</span><span class="hud-weapon-name">SMG</span><span class="hud-weapon-ammo">0</span></div>
+      <div class="hud-weapon" id="hud-weapon-shotgun"><span class="hud-weapon-key">3</span><span class="hud-weapon-name">Shotgun</span><span class="hud-weapon-ammo">0</span></div>
+    </div>
+  </div>
+  <div class="hud-bottom-right">
+    <div id="hud-radio"><span>♪ </span><span id="hud-radio-name">Sunset FM 91.3</span></div>
+    <div id="hud-speed"><span id="hud-speed-num">0</span><span id="hud-speed-unit">km/h</span><div id="hud-speed-track"><div id="hud-speed-bar"></div></div><div id="hud-speed-car">ON FOOT</div></div>
+  </div>
+</div>
+
+<!-- Start screen -->
+<div id="start-screen" class="overlay">
+  <div class="start-inner">
+    <h1 id="game-title">NEON TIDE</h1>
+    <p id="game-subtitle">PORT MARIGOLD</p>
+    <p id="game-tagline">A getaway driver. A city at sunset. One last job.</p>
+    <button type="button" id="btn-new-game" class="menu-btn primary">New Game</button>
+    <button type="button" id="btn-continue" class="menu-btn" disabled>Continue</button>
+    <button type="button" id="btn-settings" class="menu-btn">Settings</button>
+    <p id="start-hint"><b>WASD</b> drive / move &nbsp;·&nbsp; <b>F</b> steal car &nbsp;·&nbsp; <b>E</b> / click shoot &nbsp;·&nbsp; <b>1–3</b> weapons &nbsp;·&nbsp; <b>M</b> map &nbsp;·&nbsp; <b>R</b> radio &nbsp;·&nbsp; <b>Esc</b> pause<br>Click anywhere once to unlock audio. Best played in desktop Chrome with keyboard and mouse.</p>
+  </div>
+</div>
+
+<!-- Settings overlay -->
+<div id="settings-overlay" class="overlay hidden">
+  <div class="settings-panel">
+    <h2>SETTINGS</h2>
+    <p class="sub">PORT MARIGOLD</p>
+    <div class="setting-row">
+      <label for="settings-volume">Volume<span class="hint">Master volume for music and effects.</span></label>
+      <span><input type="range" id="settings-volume" min="0" max="100" value="80" step="1"> <span id="settings-volume-value">80%</span></span>
+    </div>
+    <div class="setting-row">
+      <label for="settings-music">Music<span class="hint">Radio stations and mission jingles.</span></label>
+      <input type="checkbox" id="settings-music" checked>
+    </div>
+    <div class="setting-row">
+      <label for="settings-camera">Camera default<span class="hint">Chase camera distance when you start driving.</span></label>
+      <select id="settings-camera">
+        <option value="near" selected>Near</option>
+        <option value="far">Far</option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <label for="settings-hud">Show HUD<span class="hint">District, wanted stars, minimap and speedometer.</span></label>
+      <input type="checkbox" id="settings-hud" checked>
+    </div>
+    <div class="setting-row">
+      <label for="settings-minimap">Minimap<span class="hint">Square minimap in the bottom-left corner.</span></label>
+      <input type="checkbox" id="settings-minimap" checked>
+    </div>
+    <div class="setting-row">
+      <label for="settings-quality">Quality<span class="hint">Render quality. Lower it if the game stutters.</span></label>
+      <select id="settings-quality">
+        <option value="low">Low</option>
+        <option value="medium" selected>Medium</option>
+        <option value="high">High</option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <label for="settings-autodownscale">Auto-downscale<span class="hint">Lower the render resolution automatically to hold the frame rate.</span></label>
+      <input type="checkbox" id="settings-autodownscale" checked>
+    </div>
+    <div class="setting-row">
+      <label for="settings-inverty">Invert Y<span class="hint">Invert the mouse look direction.</span></label>
+      <input type="checkbox" id="settings-inverty">
+    </div>
+    <div class="settings-actions">
+      <button type="button" id="settings-reset" class="menu-btn">Reset Defaults</button>
+      <button type="button" id="settings-close" class="menu-btn primary">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Dialogue box -->
+<div id="dialogue-box">
+  <canvas id="dialogue-portrait" width="192" height="192"></canvas>
+  <div id="dialogue-body">
+    <div id="dialogue-name"></div>
+    <div id="dialogue-text"></div>
+    <div id="dialogue-hint">ENTER — CONTINUE</div>
+  </div>
+</div>
+
+<!-- Map overlay (static pre-boot placeholder; map.js builds the live #neon-tide-map-overlay at boot) -->
+<div id="map-overlay">
+  <div id="map-menu">
+    <h2>NEON TIDE</h2>
+    <div class="map-sub">PORT MARIGOLD</div>
+    <button type="button" id="map-btn-new-game" class="menu-btn">New Game</button>
+    <button type="button" id="map-btn-continue" class="menu-btn">Continue</button>
+    <button type="button" id="map-btn-settings" class="menu-btn">Settings</button>
+    <div class="map-hint">M / Esc — Close map</div>
+  </div>
+  <div id="map-panel">
+    <header><h3>PORT MARIGOLD</h3><span>FULL CITY MAP</span></header>
+    <canvas id="map-canvas" width="1024" height="768"></canvas>
+    <div id="map-legend">
+      <b>LEGEND</b><br>
+      <span class="swatch" style="background:#ff5a3c"></span>Sunset Boardwalk<br>
+      <span class="swatch" style="background:#2fb8c8"></span>Glass Harbor<br>
+      <span class="swatch" style="background:#9b59d0"></span>Velvet Hills<br>
+      <span class="swatch" style="background:#d8a028"></span>Saltworks Docks<br>
+      <span class="swatch" style="background:#c96a3c"></span>Old Cinder Town<br>
+      <span class="swatch" style="background:#ffffff"></span>Roads &nbsp; <span class="swatch" style="background:#ffd23c"></span>You
+    </div>
+  </div>
+</div>
+
+<!-- Pause overlay -->
+<div id="pause-overlay" class="overlay hidden">
+  <div class="pause-inner">
+    <h2>PAUSED</h2>
+    <button type="button" id="btn-resume" class="menu-btn primary">Resume</button>
+    <button type="button" id="btn-pause-settings" class="menu-btn">Settings</button>
+    <button type="button" id="btn-pause-quit" class="menu-btn">Quit to Title</button>
+  </div>
+</div>
+
+<!-- BUSTED screen -->
+<div id="busted-screen" class="overlay hidden">
+  <div class="busted-inner">
+    <h2>BUSTED</h2>
+    <p id="busted-reason">The Marigold Harbor Police caught up with you.</p>
+    <button type="button" id="btn-retry" class="menu-btn primary">Retry</button>
+    <button type="button" id="btn-busted-title" class="menu-btn">Main Menu</button>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
